@@ -1,65 +1,10 @@
-# import whisper
-# import os
-# from videodb import connect, IndexType, SceneExtractionType
-# import subprocess
-# from langchain.text_splitter import RecursiveCharacterTextSplitter
-# from langchain.embeddings import OpenAIEmbeddings
-# from langchain.vectorstores import Chroma
-# from langchain.llms import OpenAI
-# from langchain.prompts import PromptTemplate
-
-# def transcribe_video(video_path):
-#     model = whisper.load_model("base")
-#     transcription = model.transcribe(video_path)["text"]
-#     with open("transcription.txt", "w") as f:
-#         f.write(transcription)
-#     return "transcription.txt"
-
-# def extract_frames(video_path, output_dir="frames"):
-#     os.makedirs(output_dir, exist_ok=True)
-#     subprocess.run(["ffmpeg", "-i", video_path, "-vf", "fps=1", f"{output_dir}/frame_%04d.png"])
-
-# conn = connect(api_key=os.getenv("VIDEO_DB_API_KEY"))
-# video = conn.upload(url=video_path)  # Or local path
-# video.index_spoken_words()  # Audio index
-# video.index_scenes(extraction_type=SceneExtractionType.shot_based, prompt="Describe scenes in detail")
-
-# def index_video(transcript_path):
-#     with open(transcript_path, "r") as f:
-#         text = f.read()
-#     splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=20)
-#     chunks = splitter.split_text(text)
-    
-#     embeddings = OpenAIEmbeddings()
-#     vectorstore = Chroma.from_texts(chunks, embeddings)
-#     return vectorstore
-
-# def get_rag_response(video_path, query):
-#     transcript = transcribe_video(video_path)
-#     vectorstore = index_video(transcript)
-    
-#     # Retrieve top 3 relevant chunks
-#     docs = vectorstore.similarity_search(query, k=3)
-#     context = "\n".join([doc.page_content for doc in docs])
-    
-#     # Prompt template
-#     prompt = PromptTemplate(
-#         input_variables=["query", "context"],
-#         template="Answer based on video context: {context}\nQuestion: {query}\nAnswer:"
-#     )
-#     llm = OpenAI(model="gpt-4o-mini")
-#     response = llm(prompt.format(query=query, context=context))
-#     return response
-
-import os
 import subprocess
 from videodb import connect, SceneExtractionType
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain.embeddings import OpenAIEmbeddings
-from langchain.vectorstores import Chroma
+from langchain_chroma import Chroma
 from langchain.prompts import PromptTemplate
-from langchain_google_genai import ChatGoogleGenerativeAI
 from google.cloud import speech
+from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 
 def transcribe_video(video_path):
     client = speech.SpeechClient()
@@ -110,7 +55,7 @@ def index_video(transcript_path):
         text = f.read()
     splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=20)
     chunks = splitter.split_text(text)
-    embeddings = OpenAIEmbeddings()
+    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
     vectorstore = Chroma.from_texts(chunks, embeddings)
     return vectorstore
 
