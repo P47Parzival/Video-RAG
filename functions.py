@@ -5,6 +5,7 @@ from langchain_chroma import Chroma
 from langchain.prompts import PromptTemplate
 from google.cloud import speech
 from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
+import os
 
 def transcribe_video(video_path):
     client = speech.SpeechClient()

@@ -1,22 +1,16 @@
-# from fastapi import FastAPI, UploadFile, File
-
-# app = FastAPI()
-
-# @app.post("/upload")
-# async def upload_video(file: UploadFile = File(...)):
-#     with open("uploaded.mp4", "wb") as f:
-#         f.write(await file.read())
-#     # Process and index here
-#     return {"status": "processed"}
-
-# @app.get("/query")
-# def query_video(q: str):
-#     return {"response": get_rag_response("uploaded.mp4", q)}
-
 from fastapi import FastAPI, UploadFile, File
 from functions import get_rag_response
+from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Or specify your frontend URL
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 @app.post("/upload")
 async def upload_video(file: UploadFile = File(...)):
