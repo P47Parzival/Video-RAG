@@ -75,6 +75,19 @@ def _call_llm(prompt_text: str) -> str:
         except Exception as e_gen:
             logging.exception("llm.generate fallback failed: %s", e_gen)
             res = None
+    
+    try:
+        if hasattr(res, "content"):
+            content = getattr(res, "content")
+            if isinstance(content, str) and content.strip():
+                return content
+            # sometimes .content may be a dict with 'content' or 'text'
+            if isinstance(content, dict):
+                for key in ("content", "text"):
+                    if key in content and isinstance(content[key], str):
+                        return content[key]
+    except Exception:
+        logging.debug("extracting res.content failed", exc_info=True)
 
     if isinstance(res, str):
         return res
