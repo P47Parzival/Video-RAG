@@ -1,74 +1,136 @@
-import subprocess
-from videodb import connect, SceneExtractionType
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_chroma import Chroma
-from langchain.prompts import PromptTemplate
-from google.cloud import speech
-from langchain_google_genai import GoogleGenerativeAIEmbeddings, ChatGoogleGenerativeAI
 import os
+import logging
+import subprocess
+from typing import List
 
-def transcribe_video(video_path):
-    client = speech.SpeechClient()
-    # Convert video to audio (wav)
+import whisper
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain.prompts import PromptTemplate
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain_google_genai import ChatGoogleGenerativeAI
+from dotenv import load_dotenv
+
+load_dotenv()
+api_key = os.getenv("GOOGLE_API_KEY")
+
+logging.basicConfig(level=logging.INFO)
+
+# Load whisper model once
+_whisper_model = None
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        _whisper_model = whisper.load_model("small")  # change size if you want faster/slower
+    return _whisper_model
+
+def transcribe_video(video_path: str) -> str:
+    """Transcribe video to text using local whisper. Returns transcript file path."""
+    model = _get_whisper()
     audio_path = f"{os.path.splitext(video_path)[0]}.wav"
+    # convert to wav (16k mono) for stable transcription
     subprocess.run([
-        "ffmpeg", "-i", video_path, "-ar", "16000", "-ac", "1", "-f", "wav", audio_path
+        "ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-f", "wav", audio_path
     ], check=True)
-
-    with open(audio_path, "rb") as audio_file:
-        content = audio_file.read()
-
-    audio = speech.RecognitionAudio(content=content)
-    config = speech.RecognitionConfig(
-        encoding=speech.RecognitionConfig.AudioEncoding.LINEAR16,
-        sample_rate_hertz=16000,
-        language_code="en-US"
-    )
-
-    response = client.recognize(config=config, audio=audio)
-    transcription = " ".join([result.alternatives[0].transcript for result in response.results])
+    result = model.transcribe(audio_path)
+    transcription = result.get("text", "").strip()
     transcript_path = f"{os.path.splitext(video_path)[0]}_transcription.txt"
-    with open(transcript_path, "w") as f:
+    with open(transcript_path, "w", encoding="utf-8") as f:
         f.write(transcription)
+    logging.info("transcribe_video: wrote transcript %s (%d chars)", transcript_path, len(transcription))
     return transcript_path
 
-def extract_frames(video_path, output_dir="frames"):
-    os.makedirs(output_dir, exist_ok=True)
-    subprocess.run([
-        "ffmpeg", "-i", video_path, "-vf", "fps=1", f"{output_dir}/frame_%04d.png"
-    ], check=True)
+def index_video(transcript_path: str, persist_dir: str = None):
+    """Create a Chroma vectorstore from transcript text using HuggingFace embeddings."""
+    with open(transcript_path, "r", encoding="utf-8") as f:
+        text = f.read() or ""
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=100)
+    chunks: List[str] = splitter.split_text(text) if text and text.strip() else []
+    logging.info("index_video: transcript chars=%d, chunks=%d", len(text), len(chunks))
 
-def process_video_with_videodb(video_path):
-    api_key = os.getenv("VIDEO_DB_API_KEY")
-    if not api_key:
-        raise ValueError("VIDEO_DB_API_KEY not set in environment.")
-    conn = connect(api_key=api_key)
-    video = conn.upload(url=video_path)
-    video.index_spoken_words()
-    video.index_scenes(
-        extraction_type=SceneExtractionType.shot_based,
-        prompt="Describe scenes in detail"
-    )
-    return True
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
+    if persist_dir:
+        os.makedirs(persist_dir, exist_ok=True)
+        vect = Chroma.from_texts(chunks or [""], embeddings, persist_directory=persist_dir)
+        try:
+            vect.persist()
+        except Exception:
+            pass
+    else:
+        vect = Chroma.from_texts(chunks or [""], embeddings)
+    return vect
 
-def index_video(transcript_path):
-    with open(transcript_path, "r") as f:
-        text = f.read()
-    splitter = RecursiveCharacterTextSplitter(chunk_size=2000, chunk_overlap=20)
-    chunks = splitter.split_text(text)
-    embeddings = GoogleGenerativeAIEmbeddings(model="models/embedding-001")
-    vectorstore = Chroma.from_texts(chunks, embeddings)
-    return vectorstore
+def _call_llm(prompt_text: str) -> str:
+    """Call Gemini via langchain wrapper and return plain string."""
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro")
+    # try common invocation styles
+    res = None
+    try:
+        res = llm.invoke(prompt_text)
+    except Exception as e_invoke:
+        logging.debug("llm.invoke failed: %s", e_invoke)
+        try:
+            from langchain.schema import HumanMessage
+            res = llm.generate([[HumanMessage(content=prompt_text)]])
+        except Exception as e_gen:
+            logging.exception("llm.generate fallback failed: %s", e_gen)
+            res = None
 
-def get_rag_response(video_path, query):
-    transcript_path = transcribe_video(video_path)
+    if isinstance(res, str):
+        return res
+    if res is None:
+        logging.warning("_call_llm: LLM returned None")
+        return "No response from LLM"
+    if hasattr(res, "generations"):
+        try:
+            return res.generations[0][0].text
+        except Exception:
+            pass
+    if isinstance(res, dict):
+        for key in ("output", "candidates", "choices", "content", "text"):
+            if key in res:
+                val = res[key]
+                if isinstance(val, list) and val:
+                    first = val[0]
+                    if isinstance(first, dict):
+                        for sub in ("content", "text", "message"):
+                            if sub in first:
+                                return first[sub]
+                    elif isinstance(first, str):
+                        return first
+                elif isinstance(val, str):
+                    return val
+    try:
+        return str(res)
+    except Exception:
+        return "Unrecognized LLM response"
+
+def get_rag_response(video_path: str, query: str, k: int = 3) -> str:
+    """Return a string answer for query about the uploaded video."""
+    transcript_path = f"{os.path.splitext(video_path)[0]}_transcription.txt"
+    if not os.path.exists(transcript_path):
+        transcript_path = transcribe_video(video_path)
+
     vectorstore = index_video(transcript_path)
-    docs = vectorstore.similarity_search(query, k=3)
-    context = "\n".join([doc.page_content for doc in docs])
+    docs = []
+    try:
+        if hasattr(vectorstore, "similarity_search"):
+            docs = vectorstore.similarity_search(query, k=k)
+    except Exception as e:
+        logging.exception("similarity_search failed: %s", e)
+
+    context = "\n".join([d.page_content for d in docs]) if docs else ""
+    logging.info("get_rag_response: docs=%d context_len=%d", len(docs), len(context))
+
     prompt = PromptTemplate(
         input_variables=["query", "context"],
-        template="Answer based on video context: {context}\nQuestion: {query}\nAnswer:"
+        template="You are given context extracted from a video:\n\n{context}\n\nQuestion: {query}\nAnswer concisely:"
     )
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro")
-    response = llm.invoke(prompt.format(query=query, context=context))
-    return response
+    prompt_text = prompt.format(query=query, context=context)
+    answer = _call_llm(prompt_text)
+
+    if not answer or answer.strip().lower() in ("none", "no response from llm", ""):
+        debug = f"transcript_exists={os.path.exists(transcript_path)}, docs={len(docs)}, context_len={len(context)}"
+        logging.warning("get_rag_response: no useful answer -> %s", debug)
+        return f"No answer found. {debug}"
+    return answer
