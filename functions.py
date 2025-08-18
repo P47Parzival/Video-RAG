@@ -4,6 +4,10 @@ import subprocess
 import shutil
 import json
 from typing import List, Tuple, Dict, Any
+import time
+import soundfile as sf
+import librosa  # ✅ Added for audio duration check
+import numpy as np
 
 import whisper
 from langchain.text_splitter import RecursiveCharacterTextSplitter
@@ -23,48 +27,104 @@ _whisper_model = None
 def _get_whisper():
     global _whisper_model
     if _whisper_model is None:
-        _whisper_model = whisper.load_model("small")  # change size if you want faster/slower
+        _whisper_model = whisper.load_model("tiny")  # change size if you want faster/slower
     return _whisper_model
 
-def transcribe_video(video_path: str) -> str:
-    """Transcribe video to text using local whisper. Returns transcript file path.
-    Each segment dict includes 'start','end','text'
-    """
+def transcribe_video(video_path: str) -> Tuple[str, List[Dict[str, Any]]]:
+    """Transcribe video to text using local whisper. Returns transcript file path and segments."""
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found. Install ffmpeg and add to PATH.")
     
     model = _get_whisper()
     audio_path = f"{os.path.splitext(video_path)[0]}.wav"
-    # convert to wav (16k mono) for stable transcription
-    subprocess.run([
-        "ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-f", "wav", audio_path], 
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    result = model.transcribe(audio_path)
+
+    # Capture FFmpeg output for better error handling
+    try:
+        result = subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", video_path, "-ar", "16000", "-ac", "1", "-f", "wav", audio_path
+            ],
+            check=True,
+            capture_output=True,
+            text=True
+        )
+        logging.info("FFmpeg audio extraction successful for %s", video_path)
+    except subprocess.CalledProcessError as e:
+        logging.error("FFmpeg failed: %s", e.stderr)
+        raise RuntimeError(f"FFmpeg failed to extract audio from {video_path}: {e.stderr}")
+
+    # Check that audio file exists and has content
+    if not os.path.exists(audio_path) or os.path.getsize(audio_path) == 0:
+        raise ValueError(f"Audio extraction failed, file is empty: {audio_path}")
+
+    # Check audio duration and sampling rate
+    try:
+        duration = librosa.get_duration(path=audio_path)
+        data, sr = sf.read(audio_path)
+        if len(data) == 0:
+            raise ValueError(f"Extracted audio is empty: {audio_path}")
+        if duration < 0.1:
+            raise ValueError(f"Audio duration too short ({duration:.2f}s) for {audio_path}")
+        if sr != 16000:
+            logging.warning("Audio sampling rate is %d Hz, expected 16000 Hz", sr)
+        # ✅ Check for silent audio
+        if np.max(np.abs(data)) < 1e-6:  # Threshold for near-silent audio
+            logging.warning("Audio appears to be silent or nearly silent: %s", audio_path)
+            raise ValueError(f"Audio {audio_path} is silent or has very low amplitude")
+    except Exception as e:
+        raise RuntimeError(f"Failed to read audio file {audio_path}: {e}")
+
+    # Log audio properties for debugging
+    logging.info("Audio file %s: duration=%.2fs, sample_rate=%d Hz, size=%d bytes, max_amplitude=%.6f",
+                 audio_path, duration, sr, os.path.getsize(audio_path), np.max(np.abs(data)))
+
+    # ✅ Try transcription with kv_cache disabled to avoid KeyError
+    try:
+        result = model.transcribe(audio_path, verbose=False, no_speech_threshold=0.6, suppress_tokens=[])  # ✅ Adjusted params
+        if not result.get("text") and not result.get("segments"):
+            raise ValueError("Whisper returned empty transcription")
+    except Exception as e:
+        logging.error("Whisper transcription failed: %s", str(e))
+        # ✅ Fallback: Try transcription without key-value cache
+        try:
+            logging.info("Retrying transcription without kv_cache for %s", audio_path)
+            result = model.transcribe(audio_path, verbose=False, no_speech_threshold=0.6, suppress_tokens=[], use_kv_caching=False)
+            if not result.get("text") and not result.get("segments"):
+                raise ValueError("Whisper returned empty transcription even without kv_cache")
+        except Exception as e:
+            raise RuntimeError(f"Whisper failed to transcribe {audio_path}: {e}")
+
     transcription = result.get("text", "").strip()
-    segments = []
-    # whisper returns segments list with start/end/text
-    for s in result.get("segments", []) :
-        segments.append({"start": float(s.get("start",0.0)), "end": float(s.get("end",0.0)), "text": s.get("text","").strip()})
+    segments = [
+        {"start": float(s.get("start", 0.0)), 
+         "end": float(s.get("end", 0.0)), 
+         "text": s.get("text", "").strip()}
+        for s in result.get("segments", [])
+    ]
+
+    # Save transcription only if non-empty
+    if not transcription:
+        logging.warning("No transcription produced for %s", audio_path)
 
     transcript_path = f"{os.path.splitext(video_path)[0]}_transcription.txt"
     with open(transcript_path, "w", encoding="utf-8") as f:
-        f.write(transcription)
-    
-    # save segments metadata for debugging / reuse
+        f.write(transcription if transcription else "No transcription available")
+
     seg_path = f"{os.path.splitext(video_path)[0]}_segments.json"
     with open(seg_path, "w", encoding="utf-8") as f:
         json.dump(segments, f)
 
+    # Clean up audio file safely
     try:
         if os.path.exists(audio_path):
             os.remove(audio_path)
-    except Exception:
-        logging.warning("Could not remove temp audio %s", audio_path)
-    
-    logging.info("transcribe_video: wrote transcript %s (%d chars)", transcript_path, len(transcription), len(segments))
+            logging.info("Removed temporary audio file %s", audio_path)
+    except Exception as e:
+        logging.warning("Could not remove temp audio %s: %s", audio_path, e)
+
+    logging.info("transcribe_video: wrote transcript %s (%d chars, %d segments)", 
+                 transcript_path, len(transcription), len(segments))
+
     return transcript_path, segments
 
 def index_video(transcript_path: str, persist_dir: str = None, segments: List[Dict[str,Any]] = None):
@@ -118,28 +178,34 @@ def extract_frames_at_timestamps(video_path: str, timestamps: List[float], out_d
             logging.exception("Failed to extract frame at %s", t)
     return out_paths
 
-def _call_llm(prompt_text: str) -> str:
-    """Call Gemini via langchain wrapper and return plain string."""
-    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro")
-    # try common invocation styles
+def _call_llm(prompt_text: str, max_retries: int = 3, backoff: float = 2.0) -> str:
+    """Call Gemini via langchain wrapper and return plain string. Deterministic and retry on transient errors."""
+    # set temperature=0 for deterministic outputs
+    llm = ChatGoogleGenerativeAI(model="gemini-2.5-pro", temperature=0)
+    attempt = 0
     res = None
-    try:
-        res = llm.invoke(prompt_text)
-    except Exception as e_invoke:
-        logging.debug("llm.invoke failed: %s", e_invoke)
+    while attempt < max_retries:
         try:
-            from langchain.schema import HumanMessage
-            res = llm.generate([[HumanMessage(content=prompt_text)]])
-        except Exception as e_gen:
-            logging.exception("llm.generate fallback failed: %s", e_gen)
-            res = None
-    
+            # prefer invoke
+            res = llm.invoke(prompt_text)
+            break
+        except Exception as e:
+            attempt += 1
+            logging.warning("LLM call attempt %d failed: %s", attempt, e)
+            # if it's clearly transient/internal server error, retry
+            if attempt < max_retries:
+                time.sleep(backoff ** attempt)
+            else:
+                logging.exception("LLM permanently failed after retries")
+                res = None
+                break
+
+    # prefer .content if present
     try:
         if hasattr(res, "content"):
             content = getattr(res, "content")
             if isinstance(content, str) and content.strip():
                 return content
-            # sometimes .content may be a dict with 'content' or 'text'
             if isinstance(content, dict):
                 for key in ("content", "text"):
                     if key in content and isinstance(content[key], str):
@@ -152,11 +218,13 @@ def _call_llm(prompt_text: str) -> str:
     if res is None:
         logging.warning("_call_llm: LLM returned None")
         return "No response from LLM"
+
     if hasattr(res, "generations"):
         try:
             return res.generations[0][0].text
         except Exception:
             pass
+
     if isinstance(res, dict):
         for key in ("output", "candidates", "choices", "content", "text"):
             if key in res:

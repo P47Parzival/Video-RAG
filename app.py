@@ -10,7 +10,9 @@ if uploaded_file:
     try:
         # send to backend as multipart file correctly
         files = {"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)}
-        res = requests.post(f"{BACKEND_URL}/upload", files=files, timeout=120)
+        with st.spinner("Uploading and processing (this can take a few minutes on CPU)..."):
+            # increase timeout for slow CPU transcription/indexing
+            res = requests.post(f"{BACKEND_URL}/upload", files=files, timeout=600)
         if res.status_code == 200:
             st.success("Video uploaded and processed!")
         else:
