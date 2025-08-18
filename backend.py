@@ -57,28 +57,25 @@ async def upload_video(file: UploadFile = File(...)):
         f.write(await file.read())
 
     try:
-        transcript = transcribe_video(file_location)
+        transcript, segments = transcribe_video(file_location)
         idx_dir = f"index_{os.path.splitext(safe_name)[0]}"
-        index_video(transcript, persist_dir=idx_dir)
+        index_video(transcript, persist_dir=idx_dir, segments=segments)
     except Exception as e:
         return {"status": "error", "error": str(e)}
     return {"status": "processed", "filename": file_location}
 
-# ...existing code...
 @app.get("/query")
 def query_video(q: str):
     try:
-        # pick latest uploaded_* video in cwd
         files = [p for p in glob.glob("uploaded_*") if p.lower().endswith((".mp4", ".mov", ".mkv"))]
         if not files:
             return {"error": "No uploaded video found. Please POST /upload first."}
         files.sort(key=lambda p: os.path.getmtime(p), reverse=True)
         video_path = files[0]
-        response = get_rag_response(video_path, q)
-        # ensure response is always a string
-        if response is None:
-            response = "No answer returned from server. Check backend logs."
-        return {"response": response}
+        result = get_rag_response(video_path, q)
+        answer = result.get("answer")
+        frames = result.get("frames", [])
+        return {"response": answer, "frames": frames}
     except Exception as e:
         logging.exception("query_video error")
         return {"error": str(e)}
