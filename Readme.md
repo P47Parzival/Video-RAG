@@ -177,6 +177,17 @@ Choose based on your needs:
 | `base` | 74 MB | 🚀 Fast | Better |
 | `small` | 244 MB | 🐌 Slower | Best |
 
+First Startup with small model and when things dont work change model to tiny.
+
+```
+   # change size if you want faster/slower
+   def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        _whisper_model = whisper.load_model("tiny")  
+    return _whisper_model
+```
+
 ### Embedding Models
 
 Default: `all-MiniLM-L6-v2` (fast, good quality)
@@ -270,6 +281,9 @@ Contributions are welcome! Please feel free to submit a Pull Request. For major 
 5. Open a Pull Request
 
 ---
+
+### TL;DR
+You upload a video and ask question, on the basis of the prompt/question you ask, you get a high level answer with 3 frames demostrating the occurrence to justify the answer.
 
 ## 📄 License
 
