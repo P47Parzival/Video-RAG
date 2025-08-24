@@ -10,6 +10,8 @@ A simple Video RAG system that lets users upload a video, builds a local searcha
 [![FastAPI](https://img.shields.io/badge/FastAPI-0.100+-green.svg)](https://fastapi.tiangolo.com)
 [![License](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
+![Rag flow](./assests/Blank%20diagram%20(1).jpeg)
+
 ![Architecture & Flow](./assests/diagram-export-8-15-2025-6_03_21-PM.png)
 
 ---
